@@ -7,6 +7,18 @@ import aiohttp
 from bs4 import BeautifulSoup
 import requests
 
+import logging
+
+# Что-то типа такого было бы круто.
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+file_handler = logging.FileHandler('logs.log')
+file_handler.setLevel(logging.INFO)
+
+file_handler.setFormatter(formatter)
+logging.getLogger('').addHandler(file_handler)
+
 
 class Parser:
     '''
@@ -35,8 +47,12 @@ class Parser:
             response = requests.get(url)
             response.encoding = 'utf-8'
             return BeautifulSoup(response.text, 'lxml')
-        except Exception:
-            print(f'Адрес {url} недоступен')
+        except Exception as e:
+            ''' Обрабатывать так исключения неправильно,
+            отлавливать нужно конкретные исключение, а не все сразу. В данном случае будет что-то типа
+            requests.exceptions.RequestException | requests.exceptions.Timeout | requests.exceptions.InvalidURL
+            '''
+            logging.error(f'{e} || URL - {url}')
 
     def get_urls_list(self, start_url):
         '''
@@ -67,7 +83,7 @@ class Parser:
             pattern = " ".join(next_url.replace('/wiki/', '').split('_'))
             selector = f'div.mw-body-content p a[title="{pattern}"]'
             paragr_with_link = soup.select_one(selector).parent
-            pattern = r'[A-ZА-Я0-9].+?href="' + re.escape(quote(next_url)) + '".+?\.'
+            pattern = r'[A-ZА-Я0-9].+?href="' + re.escape(quote(next_url)) + '".+?\\.'
             sentence_with_tags = re.search(pattern, str(paragr_with_link))
             result_sentence = ' '.join(
                 map(str.strip, re.split(
@@ -91,6 +107,7 @@ class Parser:
         '''
         try:
             async with session.get(url=url) as response:
+                logging.info(f"Посещена страница: {url}")
                 resp = await response.text()
                 soup = BeautifulSoup(resp, 'lxml')
                 urls_list = list(set(
@@ -100,8 +117,8 @@ class Parser:
                     f'{key} -> {url.replace("https://ru.wikipedia.org", "")}',
                     urls_list
                 ))
-        except RuntimeError:
-            pass
+        except RuntimeError as e:
+            logging.error(f"{e} || {url}")
 
     async def create_tasks(self):
         '''
@@ -113,11 +130,11 @@ class Parser:
         Также контролирует, чтобы уже пройденные ссылки
         не проходились повторно.
         '''
+        tasks = []
+        if self.next_queue:
+            self.search_queue = self.next_queue
+            self.next_queue = []
         async with aiohttp.ClientSession() as session:
-            tasks = []
-            if self.next_queue:
-                self.search_queue = self.next_queue
-                self.next_queue = []
             for key, urls_list in self.search_queue:
                 for link in urls_list:
                     if link not in self.ckecked_urls:
@@ -144,18 +161,30 @@ class Parser:
         Записывает в лог список проверенных ссылок.
         '''
         urls_list = self.get_urls_list(self.start_url)
+        ''' 
+        Нейминг переменных:
+        Не стоит использовать префиксы и постфиксы типа set | list и прочее. Сам таким болею иногда,
+        но в целом - плохая практика, в данном случае urls и self.get_urls было бы достаточно.
+        '''
         if self.start_url in urls_list:
             self.way_to_final_url = self.start_url
         else:
             self.search_queue = [(self.start_url, urls_list)]
             asyncio.set_event_loop_policy(
-                asyncio.WindowsSelectorEventLoopPolicy()
+                asyncio.DefaultEventLoopPolicy()
             )
+            '''Вот тут не запустится на других операционных системах.
+            Лучше использовать DefaultEventLoopPolicy. Насколько я понял из доки,
+             он должен на винде работать, но протестить не могу :)
+            '''
         while not self.way_to_final_url:
             asyncio.run(self.create_tasks())
 
         self.get_text(self.way_to_final_url)
         with open('logs.txt', 'w', encoding='utf-8') as file:
+            ''' Как-будто бы правильно логировать в процессе то,
+            что делаешь, а не после просто пусть кидать в файл
+            '''
             for ind, url in enumerate(self.ckecked_urls, 1):
                 file.write(f'{ind}. {url}\n')
 
@@ -165,4 +194,25 @@ if __name__ == '__main__':
         data = json.load(file)
         start_url = data.get('start_url')
         final_url = data.get('final_url')
-    Parser(start_url, final_url).main()
+    try:
+        Parser(start_url, final_url).main()
+    except Exception as e:
+        logging.error(e)
+        "А вот тут можно ловить все, чтобы у тебя в целом приложение не падало, а завершало работу корректно"
+
+''' 
+++ За алгоритм поиска.
++ за то, что это в целом сделано через async
+
+Какие глобальные вещи тут увидел:
+- Отсутствует типизация в целом. Сильно повышает читаемость кода указание типов.
+- Круто выносить всякие зашитые константы, регулярки и прочее куда-то.
+Если задача небольшая, как тут - можно просто в начале файла в апперкейсе объявить, но совсем правильно - 
+в отдельный конфигурационный файл
+
+З.Ы. Нет брейкпоинта по глубине поиска, как и в целом нет обработки случая, если страницы нет. 
+В условии задачи про это не было написано, так, как идея.
+По PEP 8 все соблюдено, но докстринги к методам объявляются в двойных ковычках, а не в одинарных.
+Вообще если у тебя асинхронный код - то все функции должны быть асинхронными.
+Хочется как можно больше ввода- вывода зашить в задачи, но у тебя в целом ок все сделано.
+'''
